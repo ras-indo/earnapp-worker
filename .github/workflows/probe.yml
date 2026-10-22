@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   probe:
@@ -40,3 +41,26 @@ jobs:
           set -o pipefail
           timeout 100 sudo ./earnappd -n 2 2>&1 | stdbuf -oL sed -u 's/^/[w] /' || true
           echo "=== selesai probe ==="
+
+      - name: Cleanup run & artifact lama
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${GITHUB_REPOSITORY}"
+          KEEP="${GITHUB_RUN_ID}"
+          echo "run aktif: $KEEP — menghapus run completed lain"
+          gh api "/repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.id != $KEEP and .status == \"completed\") | .id" \
+          | while read -r id; do
+              [ -z "$id" ] && continue
+              echo "  hapus run $id"
+              gh api -X DELETE "/repos/$REPO/actions/runs/$id" >/dev/null 2>&1 || echo "  gagal $id"
+            done
+          gh api "/repos/$REPO/actions/artifacts?per_page=100" --jq '.artifacts[].id' 2>/dev/null \
+          | while read -r a; do
+              [ -z "$a" ] && continue
+              gh api -X DELETE "/repos/$REPO/actions/artifacts/$a" >/dev/null 2>&1 || true
+            done
+          echo "=== sisa run ==="
+          gh api "/repos/$REPO/actions/runs?per_page=20" --jq '.workflow_runs[] | "\(.id) \(.name) \(.status/\(.conclusion))"' || true
