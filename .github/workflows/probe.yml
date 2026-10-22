@@ -1,0 +1,42 @@
+name: probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: IP + ASN runner
+        run: |
+          echo "IP: $(curl -s --max-time 10 https://api.ipify.org)"
+          curl -s --max-time 10 https://ipinfo.io/json || true
+          echo
+
+      - name: Dependency + Build
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev
+          gcc -O2 -o earnappd cworker/earnappd.c -lssl -lcrypto -lpthread
+
+      - name: State
+        env:
+          NODES_TXT: ${{ secrets.NODES_TXT }}
+          CONSENT: ${{ secrets.CONSENT }}
+        run: |
+          sudo mkdir -p /etc/earnapp
+          printf '%s\n' "$NODES_TXT" | sudo tee /etc/earnapp/nodes.txt >/dev/null
+          printf '%s' "$CONSENT" | sudo tee /etc/earnapp/consent >/dev/null
+          sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
+          echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
+
+      - name: Worker 100 detik (2 node)
+        run: |
+          set -o pipefail
+          timeout 100 sudo ./earnappd -n 2 2>&1 | stdbuf -oL sed -u 's/^/[w] /' || true
+          echo "=== selesai probe ==="
