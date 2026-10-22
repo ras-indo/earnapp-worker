@@ -1,0 +1,55 @@
+name: worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */5 * * *"   # setiap 5 jam; job ~5h45m, run berikutnya antre di concurrency group
+
+concurrency:
+  group: earnapp-worker
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355          # < batas keras GitHub 360 menit
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diagnostik IP runner
+        run: |
+          echo "=== IP publik runner ==="
+          curl -s --max-time 10 https://api.ipify.org; echo
+          echo "=== ASN / org ==="
+          curl -s --max-time 10 https://ipinfo.io/json || true
+          echo
+
+      - name: Dependency
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libssl-dev
+
+      - name: Build
+        run: |
+          gcc -O2 -o earnappd cworker/earnappd.c -lssl -lcrypto -lpthread
+          ls -lh earnappd
+
+      - name: Restore state dari secrets
+        env:
+          NODES_TXT: ${{ secrets.NODES_TXT }}
+          CONSENT: ${{ secrets.CONSENT }}
+        run: |
+          sudo mkdir -p /etc/earnapp
+          printf '%s\n' "$NODES_TXT" | sudo tee /etc/earnapp/nodes.txt > /dev/null
+          printf '%s' "$CONSENT" | sudo tee /etc/earnapp/consent > /dev/null
+          sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
+          echo "node terdaftar: $(grep -c . /etc/earnapp/nodes.txt)"
+          echo "consent: $(cat /etc/earnapp/consent)"
+
+      - name: Jalankan worker (5j45m)
+        run: |
+          set -o pipefail
+          timeout 20700 sudo ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[worker] /'
