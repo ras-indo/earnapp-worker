@@ -1,0 +1,70 @@
+name: probe-tor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  probe-tor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: IP langsung (tanpa Tor)
+        run: |
+          echo "direct IP: $(curl -s --max-time 10 https://api.ipify.org)"
+          curl -s --max-time 10 https://ipinfo.io/json | grep -E '"(ip|org|city)"' || true
+
+      - name: Install Tor + torsocks
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tor torsocks libssl-dev
+          gcc -O2 -o earnappd cworker/earnappd.c -lssl -lcrypto -lpthread
+
+      - name: Nyalakan Tor + tunggu bootstrap
+        run: |
+          sudo service tor start || sudo tor --SocksPort 9050 --RunAsDaemon 1
+          for i in $(seq 1 60); do
+            if curl -s --max-time 5 --socks5-hostname 127.0.0.1:9050 https://api.ipify.org > /tmp/torip.txt 2>/dev/null; then
+              echo "Tor siap setelah ${i}x2 detik"; break
+            fi
+            sleep 2
+          done
+          echo "tor exit IP: $(cat /tmp/torip.txt)"
+          echo "=== exit node detail ==="
+          curl -s --max-time 15 --socks5-hostname 127.0.0.1:9050 https://ipinfo.io/json | grep -E '"(ip|org|city|country)"' || true
+
+      - name: State
+        env:
+          NODES_TXT: ${{ secrets.NODES_TXT }}
+          CONSENT: ${{ secrets.CONSENT }}
+        run: |
+          sudo mkdir -p /etc/earnapp
+          printf '%s\n' "$NODES_TXT" | sudo tee /etc/earnapp/nodes.txt >/dev/null
+          printf '%s' "$CONSENT" | sudo tee /etc/earnapp/consent >/dev/null
+          sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
+          echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
+
+      - name: Worker via Tor 200 detik
+        run: |
+          set -o pipefail
+          timeout 200 torsocks ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[tor-worker] /' || true
+          echo "=== selesai probe-tor ==="
+
+      - name: Ringkasan
+        if: always()
+        run: echo "cek jumlah CONNECT di step sebelumnya"
+
+      - name: Cleanup run lama
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${GITHUB_REPOSITORY}"; KEEP="${GITHUB_RUN_ID}"
+          gh api "/repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.id != $KEEP and .status == \"completed\") | .id" \
+          | while read -r id; do [ -z "$id" ] && continue; echo "hapus run $id"; gh api -X DELETE "/repos/$REPO/actions/runs/$id" >/dev/null 2>&1 || true; done
