@@ -36,10 +36,10 @@ jobs:
           sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
           echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
 
-      - name: Worker 100 detik (2 node)
+      - name: Worker 200 detik (semua node)
         run: |
           set -o pipefail
-          timeout 100 sudo ./earnappd -n 2 2>&1 | stdbuf -oL sed -u 's/^/[w] /' || true
+          timeout 200 sudo ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[w] /' || true
           echo "=== selesai probe ==="
 
       - name: Cleanup run & artifact lama
