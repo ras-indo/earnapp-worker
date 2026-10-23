@@ -486,6 +486,7 @@ static int ws_send_ping(WS *ws) {
 }
 
 static int ws_recv_frame(WS *ws, int *op, unsigned char **payload, int *plen, int timeout_s) {
+    *payload = NULL; *plen = 0;
     struct timeval tv = {timeout_s, 0};
     setsockopt(ws->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 #define RDCHK(n) do { if ((n) <= 0) { \

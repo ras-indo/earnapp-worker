@@ -33,16 +33,16 @@ jobs:
       - name: Cari proxy gratis (pool)
         run: |
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            python3 cworker/proxy_pool.py --once --workers 250 --sample 3000 --keep 200
+            python3 cworker/proxy_pool.py --once --workers 250 --sample 6000 --keep 300
           echo "pool: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
           head -5 /etc/earnapp/proxies.txt
 
-      - name: Worker via proxy pool 400 detik
+      - name: Worker via proxy pool 600 detik
         env:
           EARNAPP_PROXY_FILE: /etc/earnapp/proxies.txt
         run: |
           set -o pipefail
-          timeout 400 sudo env EARNAPP_PROXY_FILE="$EARNAPP_PROXY_FILE" ./earnappd 2>&1 \
+          timeout 600 sudo env EARNAPP_PROXY_FILE="$EARNAPP_PROXY_FILE" ./earnappd 2>&1 \
             | stdbuf -oL sed -u 's/^/[pool] /' || true
           echo "=== selesai probe-pool ==="
 
