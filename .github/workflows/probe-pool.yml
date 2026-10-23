@@ -1,0 +1,57 @@
+name: probe-pool
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  probe-pool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev
+          gcc -O2 -o earnappd cworker/earnappd.c -lssl -lcrypto -lpthread
+
+      - name: State
+        env:
+          NODES_TXT: ${{ secrets.NODES_TXT }}
+          CONSENT: ${{ secrets.CONSENT }}
+        run: |
+          sudo mkdir -p /etc/earnapp
+          printf '%s\n' "$NODES_TXT" | sudo tee /etc/earnapp/nodes.txt >/dev/null
+          printf '%s' "$CONSENT" | sudo tee /etc/earnapp/consent >/dev/null
+          sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
+          echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
+
+      - name: Cari proxy gratis (pool)
+        run: |
+          sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
+            python3 cworker/proxy_pool.py --once --workers 250 --sample 3000 --keep 200
+          echo "pool: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
+          head -5 /etc/earnapp/proxies.txt
+
+      - name: Worker via proxy pool 400 detik
+        env:
+          EARNAPP_PROXY_FILE: /etc/earnapp/proxies.txt
+        run: |
+          set -o pipefail
+          timeout 400 sudo env EARNAPP_PROXY_FILE="$EARNAPP_PROXY_FILE" ./earnappd 2>&1 \
+            | stdbuf -oL sed -u 's/^/[pool] /' || true
+          echo "=== selesai probe-pool ==="
+
+      - name: Cleanup run lama
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${GITHUB_REPOSITORY}"; KEEP="${GITHUB_RUN_ID}"
+          gh api "/repos/$REPO/actions/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.id != $KEEP and .status == \"completed\") | .id" \
+          | while read -r id; do [ -z "$id" ] && continue; echo "hapus run $id"; gh api -X DELETE "/repos/$REPO/actions/runs/$id" >/dev/null 2>&1 || true; done

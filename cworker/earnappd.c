@@ -17,6 +17,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -50,6 +51,9 @@ typedef struct NodeCtx {
     char oldcid[128];
     char cid[128];
     char ifname[32];
+    char px_host[64];
+    int px_port;
+    int px_type;          /* 0=langsung, 1=socks5, 2=http connect */
     long consent_ts;
     int hb_n;
     int idx;
@@ -156,68 +160,236 @@ static int verify_cb(int ok, X509_STORE_CTX *ctx) {
 
 typedef struct { SSL *ssl; int fd; unsigned char buf[65536]; int blen; } WS;
 
-/* ---------------- SOCKS5 opsional (mis. Tor) ---------------- */
+/* ---------------- proxy pool (socks5 / http connect) ---------------- */
+typedef struct {
+    char host[64];
+    int port;
+    int type;              /* 1=socks5, 2=http connect */
+    int fails;
+    long dead_until;
+    int owner;             /* -1 = bebas */
+} Px;
+
+#define MAX_PX 512
+static Px g_px[MAX_PX];
+static int g_pxn = 0;
+static pthread_mutex_t g_pxmtx = PTHREAD_MUTEX_INITIALIZER;
+static long g_px_mtime = 0;
+static const char *g_pxfile = CONFDIR "/proxies.txt";
+
+/* proxy aktif utk thread ini (diwarisi thread koneksi data) */
+static __thread int t_px_type = 0;
+static __thread char t_px_host[64];
+static __thread int t_px_port = 0;
+
+/* fallback satu proxy global via env */
 static char g_socks_host[64];
 static int  g_socks_port = 0;
 
-static void socks_init(void) {
-    const char *e = getenv("EARNAPP_SOCKS");
-    if (!e || !*e) return;
-    const char *c = strrchr(e, ':');
-    if (!c) return;
-    int n = (int)(c - e);
-    if (n <= 0 || n >= (int)sizeof g_socks_host) return;
-    memcpy(g_socks_host, e, n);
-    g_socks_host[n] = 0;
-    g_socks_port = atoi(c + 1);
-    logt("SOCKS5 aktif via %s:%d", g_socks_host, g_socks_port);
+static long now_s(void) { return (long)time(NULL); }
+
+static int px_parse_line(const char *line, Px *out) {
+    char buf[160];
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p || *p == '#') return -1;
+    snprintf(buf, sizeof buf, "%s", p);
+    char *nl = strpbrk(buf, "\r\n \t"); if (nl) *nl = 0;
+    out->type = 1;
+    char *hp = buf;
+    if (!strncmp(hp, "socks5://", 9)) { out->type = 1; hp += 9; }
+    else if (!strncmp(hp, "socks4://", 9)) { out->type = 1; hp += 9; }
+    else if (!strncmp(hp, "http://", 7)) { out->type = 2; hp += 7; }
+    else if (!strncmp(hp, "https://", 8)) { out->type = 2; hp += 8; }
+    char *colon = strrchr(hp, ':');
+    if (!colon) return -1;
+    *colon = 0;
+    int port = atoi(colon + 1);
+    if (!*hp || port <= 0 || port > 65535) return -1;
+    snprintf(out->host, sizeof out->host, "%s", hp);
+    out->port = port;
+    out->fails = 0;
+    out->dead_until = 0;
+    out->owner = -1;
+    return 0;
 }
 
-static int socks5_connect(const char *host, int port) {
-    struct in_addr pipa;
-    if (dns_query_a(g_socks_host, &pipa) < 0) { logt("socks: dns proxy gagal"); return -1; }
+static int px_load(const char *path, int force) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!force && (long)st.st_mtime == g_px_mtime) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    pthread_mutex_lock(&g_pxmtx);
+    /* pertahankan status proxy yang sudah dikenal */
+    Px old[MAX_PX];
+    int oldn = g_pxn;
+    memcpy(old, g_px, sizeof(Px) * (size_t)oldn);
+    int n = 0;
+    char line[192];
+    while (n < MAX_PX && fgets(line, sizeof line, f)) {
+        Px t;
+        if (px_parse_line(line, &t) < 0) continue;
+        for (int i = 0; i < oldn; i++) {
+            if (old[i].port == t.port && !strcmp(old[i].host, t.host)) {
+                t.fails = old[i].fails;
+                t.dead_until = old[i].dead_until;
+                t.owner = old[i].owner;
+                break;
+            }
+        }
+        g_px[n++] = t;
+    }
+    fclose(f);
+    g_pxn = n;
+    g_px_mtime = (long)st.st_mtime;
+    pthread_mutex_unlock(&g_pxmtx);
+    logt("proxy pool: %d proxy (%s)", n, path);
+    return n;
+}
+
+/* ambil satu proxy hidup; sebar supaya tiap node beda IP bila tersedia */
+static int px_acquire(NodeCtx *n) {
+    if (!g_pxn) return -1;
+    long t = now_s();
+    pthread_mutex_lock(&g_pxmtx);
+    int start = (int)(n->idx * 37 + (int)(t / 60)) % g_pxn;
+    int best = -1;
+    for (int k = 0; k < g_pxn; k++) {
+        int i = (start + k) % g_pxn;
+        if (g_px[i].dead_until > t) continue;
+        if (g_px[i].owner == n->idx) { best = i; break; }
+        if (g_px[i].owner == -1 && best < 0) best = i;
+    }
+    if (best < 0) { pthread_mutex_unlock(&g_pxmtx); return -1; }
+    g_px[best].owner = n->idx;
+    snprintf(n->px_host, sizeof n->px_host, "%s", g_px[best].host);
+    n->px_port = g_px[best].port;
+    n->px_type = g_px[best].type;
+    pthread_mutex_unlock(&g_pxmtx);
+    return 0;
+}
+
+static void px_drop(NodeCtx *n) {
+    if (!n->px_type) return;
+    long t = now_s();
+    pthread_mutex_lock(&g_pxmtx);
+    for (int i = 0; i < g_pxn; i++) {
+        if (g_px[i].port != n->px_port || strcmp(g_px[i].host, n->px_host)) continue;
+        g_px[i].fails++;
+        if (g_px[i].fails >= 2) g_px[i].dead_until = t + 300;
+        g_px[i].owner = -1;
+        break;
+    }
+    pthread_mutex_unlock(&g_pxmtx);
+    n->px_type = 0; n->px_host[0] = 0; n->px_port = 0;
+}
+
+/* ---------------- SOCKS5 / HTTP CONNECT ---------------- */
+static void socks_init(void) {
+    const char *e = getenv("EARNAPP_SOCKS");
+    if (e && *e) {
+        const char *c = strrchr(e, ':');
+        if (c) {
+            int n = (int)(c - e);
+            if (n > 0 && n < (int)sizeof g_socks_host) {
+                memcpy(g_socks_host, e, n);
+                g_socks_host[n] = 0;
+                g_socks_port = atoi(c + 1);
+                logt("proxy global: %s:%d", g_socks_host, g_socks_port);
+            }
+        }
+    }
+    const char *f = getenv("EARNAPP_PROXY_FILE");
+    if (f && *f) g_pxfile = f;
+    px_load(g_pxfile, 1);
+}
+
+static void *px_watch(void *a) {
+    (void)a;
+    for (;;) { sleep(60); px_load(g_pxfile, 0); }
+    return NULL;
+}
+
+static int tcp_raw(const char *host, int port, int timeout_s) {
+    struct in_addr ipa;
+    if (dns_query_a(host, &ipa) < 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
-    struct timeval tv = {20, 0};
+    struct timeval tv = {timeout_s, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET; sa.sin_addr = pipa; sa.sin_port = htons((unsigned short)g_socks_port);
+    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons((unsigned short)port);
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+static int socks5_proxy(int fd, const char *host, int port) {
     unsigned char g[3] = {5, 1, 0};
-    if (write(fd, g, 3) != 3) { close(fd); return -1; }
+    if (write(fd, g, 3) != 3) return -1;
     unsigned char r[2];
-    if (read(fd, r, 2) != 2 || r[0] != 5 || r[1] != 0) { close(fd); return -1; }
+    if (read(fd, r, 2) != 2 || r[0] != 5 || r[1] != 0) return -1;
     size_t hl = strlen(host);
-    if (hl > 200) { close(fd); return -1; }
+    if (hl > 200) return -1;
     unsigned char req[512];
     int p = 0;
     req[p++] = 5; req[p++] = 1; req[p++] = 0; req[p++] = 3; req[p++] = (unsigned char)hl;
     memcpy(req + p, host, hl); p += (int)hl;
     req[p++] = (unsigned char)((port >> 8) & 0xff);
     req[p++] = (unsigned char)(port & 0xff);
-    if (write(fd, req, p) != p) { close(fd); return -1; }
+    if (write(fd, req, p) != p) return -1;
     unsigned char rep[32];
-    if (read(fd, rep, 4) != 4 || rep[1] != 0) { close(fd); return -1; }
+    if (read(fd, rep, 4) != 4 || rep[1] != 0) return -1;
     int alen = rep[3] == 1 ? 4 : rep[3] == 4 ? 16 : 0;
-    if (alen && read(fd, rep + 4, alen + 2) != alen + 2) { close(fd); return -1; }
+    if (alen && read(fd, rep + 4, alen + 2) != alen + 2) return -1;
+    return 0;
+}
+
+static int http_proxy_connect(int fd, const char *host, int port) {
+    char req[512];
+    int n = snprintf(req, sizeof req,
+        "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\nUser-Agent: Mozilla/5.0\r\nProxy-Connection: keep-alive\r\n\r\n",
+        host, port, host, port);
+    if (n <= 0 || write(fd, req, (size_t)n) != n) return -1;
+    char buf[1024];
+    int got = 0;
+    while (got < (int)sizeof buf - 1) {
+        int r = read(fd, buf + got, sizeof buf - 1 - (size_t)got);
+        if (r <= 0) return -1;
+        got += r;
+        buf[got] = 0;
+        if (strstr(buf, "\r\n\r\n")) break;
+    }
+    if (strncmp(buf, "HTTP/1.", 7) && strncmp(buf, "HTTP/1.1", 8)) return -1;
+    if (!strstr(buf, " 200")) return -1;
+    return 0;
+}
+
+static int proxy_open(const char *pxh, int pxp, int type, const char *host, int port) {
+    int fd = tcp_raw(pxh, pxp, 12);
+    if (fd < 0) return -1;
+    int rc = (type == 2) ? http_proxy_connect(fd, host, port) : socks5_proxy(fd, host, port);
+    if (rc < 0) { close(fd); return -1; }
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     return fd;
 }
 
 static int tcp_open(const char *host, int port, char *ipstr, size_t n) {
+    if (t_px_type) {
+        int fd = proxy_open(t_px_host, t_px_port, t_px_type, host, port);
+        if (fd >= 0) snprintf(ipstr, n, "px:%s", t_px_host);
+        return fd;
+    }
     if (g_socks_port) {
-        int fd = socks5_connect(host, port);
+        int fd = proxy_open(g_socks_host, g_socks_port, 1, host, port);
         if (fd >= 0) snprintf(ipstr, n, "socks:%s", host);
         return fd;
     }
-    struct in_addr ipa;
-    if (dns_query_a(host, &ipa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = tcp_raw(host, port, 20);
     if (fd < 0) return -1;
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons((unsigned short)port);
-    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -1; }
-    inet_ntop(AF_INET, &ipa, ipstr, n);
+    snprintf(ipstr, n, "%s", host);
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     return fd;
@@ -605,6 +777,11 @@ static void dc_close_vfd(DataConn *dc, int vfd) {
 }
 
 static int dc_handle_tun(DataConn *dc, const char *js) {
+    if (dc->node) {
+        t_px_type = dc->node->px_type;
+        snprintf(t_px_host, sizeof t_px_host, "%s", dc->node->px_host);
+        t_px_port = dc->node->px_port;
+    }
     long vfd = json_get_int(js, "vfd", 0);
     char host[256], port_s[16];
     if (json_get_str(js, "host", host, sizeof host) < 0) return -1;
@@ -776,9 +953,12 @@ static void *dc_thread(void *arg) {
 }
 
 static void open_data_conn(NodeCtx *n, const char *host, int port, const char *servername) {
+    t_px_type = n->px_type;
+    snprintf(t_px_host, sizeof t_px_host, "%s", n->px_host);
+    t_px_port = n->px_port;
     WS *ws = ws_connect(host, port, servername);
     if (!ws) { logt("n%d data tunnel gagal", n->idx); return; }
-    logt("n%d data tunnel OK %s:%d pin=%s", n->idx, host, servername, g_pin_ok ? "MATCH" : "?");
+    logt("n%d data tunnel OK %s:%d pin=%s", n->idx, host, port, g_pin_ok ? "MATCH" : "?");
     perr_node(n, "tun_init_success", NULL);
     DataConn *dc = calloc(1, sizeof *dc);
     dc->ws = ws; dc->node = n;
@@ -917,12 +1097,20 @@ static void *node_main(void *arg) {
     load_node_state(n);
     int fail = 0;
     for (;;) {
+        if (!n->px_type && g_pxn) {
+            if (px_acquire(n) < 0) { sleep(5); continue; }
+        }
+        t_px_type = n->px_type;
+        snprintf(t_px_host, sizeof t_px_host, "%s", n->px_host);
+        t_px_port = n->px_port;
         WS *ws = ws_connect(MAIN_HOST, MAIN_PORT, MAIN_HOST);
         if (!ws) {
             fail++;
+            if (n->px_type) { logt("n%d proxy mati (%s:%d) — ganti", n->idx, n->px_host, n->px_port); px_drop(n); sleep(2); continue; }
             sleep(5 + (fail > 6 ? 30 : fail * 3));
             continue;
         }
+        if (n->px_type) logt("n%d lewat proxy %s:%d", n->idx, n->px_host, n->px_port);
         logt("n%d wss OK pin=%s uuid=%s", n->idx, g_pin_ok ? "MATCH" : "?", n->uuid);
         fail = 0;
         perr_node(n, "init", NULL);
@@ -986,6 +1174,10 @@ int main(int argc, char **argv) {
     if (!ncount) { fprintf(stderr, "registry kosong — jalankan 'earnappd --new 1' dulu\n"); return 1; }
 
     logt("=== earnappd v2 MULTI — %d node, ifname=%s vpn=%d ===", ncount, g_ifname, g_vpn);
+    {
+        pthread_t pxt;
+        if (pthread_create(&pxt, NULL, px_watch, NULL) == 0) pthread_detach(pxt);
+    }
     NodeCtx *ctxs = calloc(ncount, sizeof(NodeCtx));
     for (int i = 0; i < ncount; i++) {
         strncpy(ctxs[i].uuid, uuids[i], sizeof ctxs[i].uuid - 1);
