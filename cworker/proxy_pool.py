@@ -12,6 +12,7 @@ segera setelah koneksi gagal (failover di level worker).
 """
 import argparse
 import concurrent.futures as cf
+import json
 import functools
 import os
 import random
@@ -153,6 +154,43 @@ def collect():
     return pool
 
 
+def ip_meta(ips):
+    """Cek tipe IP (hosting/proxy/residential) via ip-api batch."""
+    out = {}
+    url = "http://ip-api.com/batch?fields=query,hosting,proxy,mobile,as,countryCode"
+    uniq = list(dict.fromkeys(ips))
+    for i in range(0, len(uniq), 100):
+        chunk = uniq[i:i + 100]
+        try:
+            body = json.dumps([{"query": ip} for ip in chunk]).encode()
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                for row in json.loads(r.read().decode()):
+                    out[row.get("query")] = row
+        except Exception as e:
+            log("ip-api gagal: %s" % e)
+        time.sleep(4.2)
+    return out
+
+
+def residential_only(rows, factor=3):
+    """Sisakan proxy yang IP keluarnya bukan hosting/proxy (mirip syarat EarnApp)."""
+    cand = rows[:max(len(rows), 0)]
+    meta = ip_meta([r[2] for r in cand])
+    good, bad = [], 0
+    for r in cand:
+        m = meta.get(r[2])
+        if not m:
+            good.append(r)          # tidak ketahuan → anggap netral
+            continue
+        if m.get("hosting") or m.get("proxy"):
+            bad += 1
+            continue
+        good.append(r)
+    log("filter IP: %d hosting/proxy dibuang, %d lolos" % (bad, len(good)))
+    return good
+
+
 def write_atomic(rows):
     tmp = OUT + ".tmp"
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -167,7 +205,7 @@ def write_atomic(rows):
         pass
 
 
-def cycle(workers, keep, sample, timeout):
+def cycle(workers, keep, sample, timeout, allow_dc=False):
     pool = collect()
     pool = list(pool)
     random.shuffle(pool)
@@ -181,6 +219,9 @@ def cycle(workers, keep, sample, timeout):
             if res:
                 alive.append(res)
     alive.sort()
+    if alive and not allow_dc:
+        alive = residential_only(alive[:max(keep * 4, 200)])
+        alive.sort()
     if not alive:
         log("TIDAK ADA proxy hidup — file lama dipertahankan")
         return 0
@@ -196,11 +237,12 @@ def main():
     ap.add_argument("--keep", type=int, default=MAX_KEEP)
     ap.add_argument("--sample", type=int, default=2500, help="maks proxy diuji per siklus")
     ap.add_argument("--timeout", type=float, default=6.0)
+    ap.add_argument("--allow-dc", action="store_true", help="izinkan IP hosting (default: hanya residential)")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
     while True:
         try:
-            cycle(a.workers, a.keep, a.sample, a.timeout)
+            cycle(a.workers, a.keep, a.sample, a.timeout, a.allow_dc)
         except KeyboardInterrupt:
             return 0
         except Exception as e:
