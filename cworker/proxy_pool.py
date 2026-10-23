@@ -199,6 +199,15 @@ def residential_only(rows, factor=3):
     return good
 
 
+def rank_residential(rows):
+    """Taruh IP residential/mobile di atas (tanpa membuang yang hosting)."""
+    meta = ip_meta([r[2] for r in rows])
+    def score(r):
+        m = meta.get(r[2]) or {}
+        return 0 if (m and not m.get("hosting") and not m.get("proxy")) else 1
+    return sorted(rows, key=lambda r: (score(r), r[0]))
+
+
 def write_atomic(rows):
     tmp = OUT + ".tmp"
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -230,6 +239,11 @@ def cycle(workers, keep, sample, timeout, allow_dc=False):
     if alive and not allow_dc:
         alive = residential_only(alive[:max(keep * 4, 200)])
         alive.sort()
+    elif alive:
+        try:
+            alive = rank_residential(alive[:max(keep, 200)])
+        except Exception as e:
+            log("ranking gagal: %s" % e)
     if not alive:
         log("TIDAK ADA proxy hidup — file lama dipertahankan")
         return 0

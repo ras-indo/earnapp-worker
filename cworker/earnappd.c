@@ -253,13 +253,17 @@ static int px_acquire(NodeCtx *n) {
     if (!g_pxn) return -1;
     long t = now_s();
     pthread_mutex_lock(&g_pxmtx);
-    int start = (int)(n->idx * 37 + (int)(t / 60)) % g_pxn;
     int best = -1;
-    for (int k = 0; k < g_pxn; k++) {
-        int i = (start + k) % g_pxn;
-        if (g_px[i].dead_until > t) continue;
-        if (g_px[i].owner == n->idx) { best = i; break; }
-        if (g_px[i].owner == -1 && best < 0) best = i;
+    /* 1) proxy milik node ini kalau masih hidup */
+    for (int i = 0; i < g_pxn; i++) {
+        if (g_px[i].owner == n->idx && g_px[i].dead_until <= t) { best = i; break; }
+    }
+    /* 2) kalau belum punya, ambil yang paling atas (file diurut kualitas) */
+    if (best < 0) {
+        for (int i = 0; i < g_pxn; i++) {
+            if (g_px[i].dead_until > t) continue;
+            if (g_px[i].owner == -1) { best = i; break; }
+        }
     }
     if (best < 0) { pthread_mutex_unlock(&g_pxmtx); return -1; }
     g_px[best].owner = n->idx;
