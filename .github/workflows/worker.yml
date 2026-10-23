@@ -65,9 +65,9 @@ jobs:
       - name: Proxy pool gratis
         run: |
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            python3 cworker/proxy_pool.py --once --workers 300 --sample 6000 --keep 300
+            python3 cworker/proxy_pool.py --once --workers 300 --sample 6000 --keep 300 --allow-dc
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            nohup python3 cworker/proxy_pool.py --interval 300 --workers 300 --sample 6000 --keep 300 \
+            nohup python3 cworker/proxy_pool.py --interval 300 --workers 300 --sample 6000 --keep 300 --allow-dc \
             >/tmp/proxy_refresh.log 2>&1 &
           echo "pool awal: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
 
