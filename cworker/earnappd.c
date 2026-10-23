@@ -487,49 +487,79 @@ static int ws_send_ping(WS *ws) {
 
 static int ws_recv_frame(WS *ws, int *op, unsigned char **payload, int *plen, int timeout_s) {
     *payload = NULL; *plen = 0;
-    struct timeval tv = {timeout_s, 0};
-    setsockopt(ws->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-#define RDCHK(n) do { if ((n) <= 0) { \
-        int e_ = SSL_get_error(ws->ssl, (n)); \
-        if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN || errno == EWOULDBLOCK) return -2; \
-        return -1; } } while (0)
-    while (ws->blen < 2) {
-        int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
-        RDCHK(n); ws->blen += n;
+    for (;;) {
+        struct timeval tv = {timeout_s, 0};
+        setsockopt(ws->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        int need = 2;
+        while (ws->blen < need) {
+            int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
+            if (n <= 0) {
+                int e_ = SSL_get_error(ws->ssl, n);
+                if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+                return -1;
+            }
+            ws->blen += n;
+        }
+        unsigned char *h = (unsigned char *)ws->buf;
+        int opcode = h[0] & 0x0f;
+        int masked = h[1] & 0x80;
+        unsigned long long len = h[1] & 0x7f;
+        int pos = 2;
+        if (len == 126) {
+            need = 4;
+            while (ws->blen < need) {
+                int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
+                if (n <= 0) { int e_ = SSL_get_error(ws->ssl, n); if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN) return -2; return -1; }
+                ws->blen += n;
+            }
+            len = ((unsigned long long)h[2] << 8) | h[3]; pos = 4;
+        } else if (len == 127) {
+            need = 10;
+            while (ws->blen < need) {
+                int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
+                if (n <= 0) { int e_ = SSL_get_error(ws->ssl, n); if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN) return -2; return -1; }
+                ws->blen += n;
+            }
+            len = 0;
+            for (int i = 0; i < 8; i++) len = (len << 8) | h[2 + i];
+            pos = 10;
+        }
+        if (len > 16ULL * 1024 * 1024) return -1;   /* sanity */
+        if (masked) {
+            need = pos + 4;
+            while (ws->blen < need) {
+                int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
+                if (n <= 0) { int e_ = SSL_get_error(ws->ssl, n); if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN) return -2; return -1; }
+                ws->blen += n;
+            }
+        }
+        unsigned char mask[4] = {0,0,0,0};
+        int hdr = pos + (masked ? 4 : 0);
+        if (masked) memcpy(mask, ws->buf + pos, 4);
+        unsigned char *data = malloc((size_t)len + 1);
+        if (!data) return -1;
+        size_t have = (size_t)(ws->blen - hdr);
+        if (have > len) have = (size_t)len;
+        if (have) memcpy(data, ws->buf + hdr, have);
+        ws->blen = 0;                                 /* header habis dipakai */
+        size_t got = have;
+        while (got < len) {
+            int n = SSL_read(ws->ssl, data + got, (int)(len - got));
+            if (n <= 0) {
+                int e_ = SSL_get_error(ws->ssl, n);
+                free(data);
+                if (e_ == SSL_ERROR_WANT_READ || errno == EAGAIN || errno == EWOULDBLOCK) return -2;
+                return -1;
+            }
+            got += (size_t)n;
+        }
+        if (masked) for (size_t i = 0; i < len; i++) data[i] ^= mask[i & 3];
+        data[len] = 0;
+        if (opcode == 9) { ws_send_frame(ws, 0xA, data, (int)len); free(data); continue; }
+        if (opcode == 10) { free(data); continue; }
+        *payload = data; *plen = (int)len; *op = opcode;
+        return 0;
     }
-    unsigned char *h = ws->buf;
-    *op = h[0] & 0x0f;
-    int masked = h[1] & 0x80;
-    long len = h[1] & 0x7f;
-    int pos = 2;
-    if (len == 126) {
-        while (ws->blen < 4) { int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen); RDCHK(n); ws->blen += n; }
-        len = (h[2] << 8) | h[3]; pos = 4;
-    } else if (len == 127) {
-        while (ws->blen < 10) { int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen); RDCHK(n); ws->blen += n; }
-        len = 0; for (int i = 0; i < 8; i++) len = (len << 8) | h[2 + i];
-        pos = 10;
-    }
-    int need = pos + (masked ? 4 : 0) + (int)len;
-    while (ws->blen < need) {
-        int n = SSL_read(ws->ssl, ws->buf + ws->blen, sizeof ws->buf - ws->blen);
-        RDCHK(n); ws->blen += n;
-    }
-    unsigned char *data = malloc(len + 1);
-    memcpy(data, ws->buf + pos + (masked ? 4 : 0), len);
-    if (masked) {
-        unsigned char *mk = ws->buf + pos;
-        for (long i = 0; i < len; i++) data[i] ^= mk[i & 3];
-    }
-    data[len] = 0;
-    int rest = ws->blen - need;
-    memmove(ws->buf, ws->buf + need, rest);
-    ws->blen = rest;
-    *payload = data; *plen = (int)len;
-    if (*op == 9) { ws_send_frame(ws, 0xA, data, len); free(data); return ws_recv_frame(ws, op, payload, plen, timeout_s); }
-    if (*op == 10) { free(data); return ws_recv_frame(ws, op, payload, plen, timeout_s); }
-    return 0;
-#undef RDCHK
 }
 
 /* ---------------- JSON helpers ---------------- */
