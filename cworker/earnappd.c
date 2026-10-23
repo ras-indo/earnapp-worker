@@ -156,22 +156,78 @@ static int verify_cb(int ok, X509_STORE_CTX *ctx) {
 
 typedef struct { SSL *ssl; int fd; unsigned char buf[65536]; int blen; } WS;
 
-static WS *ws_connect(const char *host, int port, const char *servername) {
-    struct in_addr ipa;
-    if (dns_query_a(host, &ipa) < 0) { logt("dns gagal: %s", host); return NULL; }
+/* ---------------- SOCKS5 opsional (mis. Tor) ---------------- */
+static char g_socks_host[64];
+static int  g_socks_port = 0;
+
+static void socks_init(void) {
+    const char *e = getenv("EARNAPP_SOCKS");
+    if (!e || !*e) return;
+    const char *c = strrchr(e, ':');
+    if (!c) return;
+    int n = (int)(c - e);
+    if (n <= 0 || n >= (int)sizeof g_socks_host) return;
+    memcpy(g_socks_host, e, n);
+    g_socks_host[n] = 0;
+    g_socks_port = atoi(c + 1);
+    logt("SOCKS5 aktif via %s:%d", g_socks_host, g_socks_port);
+}
+
+static int socks5_connect(const char *host, int port) {
+    struct in_addr pipa;
+    if (dns_query_a(g_socks_host, &pipa) < 0) { logt("socks: dns proxy gagal"); return -1; }
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return NULL;
+    if (fd < 0) return -1;
     struct timeval tv = {20, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET; sa.sin_addr = pipa; sa.sin_port = htons((unsigned short)g_socks_port);
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -1; }
+    unsigned char g[3] = {5, 1, 0};
+    if (write(fd, g, 3) != 3) { close(fd); return -1; }
+    unsigned char r[2];
+    if (read(fd, r, 2) != 2 || r[0] != 5 || r[1] != 0) { close(fd); return -1; }
+    size_t hl = strlen(host);
+    if (hl > 200) { close(fd); return -1; }
+    unsigned char req[512];
+    int p = 0;
+    req[p++] = 5; req[p++] = 1; req[p++] = 0; req[p++] = 3; req[p++] = (unsigned char)hl;
+    memcpy(req + p, host, hl); p += (int)hl;
+    req[p++] = (unsigned char)((port >> 8) & 0xff);
+    req[p++] = (unsigned char)(port & 0xff);
+    if (write(fd, req, p) != p) { close(fd); return -1; }
+    unsigned char rep[32];
+    if (read(fd, rep, 4) != 4 || rep[1] != 0) { close(fd); return -1; }
+    int alen = rep[3] == 1 ? 4 : rep[3] == 4 ? 16 : 0;
+    if (alen && read(fd, rep + 4, alen + 2) != alen + 2) { close(fd); return -1; }
+    return fd;
+}
+
+static int tcp_open(const char *host, int port, char *ipstr, size_t n) {
+    if (g_socks_port) {
+        int fd = socks5_connect(host, port);
+        if (fd >= 0) snprintf(ipstr, n, "socks:%s", host);
+        return fd;
+    }
+    struct in_addr ipa;
+    if (dns_query_a(host, &ipa) < 0) return -1;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons((unsigned short)port);
+    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -1; }
+    inet_ntop(AF_INET, &ipa, ipstr, n);
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons(port);
-    char ipstr[32]; inet_ntop(AF_INET, &ipa, ipstr, sizeof ipstr);
-    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
-        logt("connect gagal %s:%d", ipstr, port); close(fd); return NULL;
-    }
+    return fd;
+}
+
+static WS *ws_connect(const char *host, int port, const char *servername) {
+    char ipstr[80];
+    int fd = tcp_open(host, port, ipstr, sizeof ipstr);
+    if (fd < 0) { logt("connect gagal %s:%d", host, port); return NULL; }
+
     SSL_CTX *lctx = SSL_CTX_new(TLS_client_method());
     if (!lctx) { close(fd); return NULL; }
     SSL_CTX_set_default_verify_paths(lctx);
@@ -351,15 +407,12 @@ static long now_ms(void) {
 /* ---------------- generic HTTPS POST ---------------- */
 static int http_post_json(const char *host, const char *path,
                           const char *ua, const char *body, char *out_status, int out_sz) {
-    struct in_addr ipa;
-    if (dns_query_a(host, &ipa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    char ipstr[80];
+    int fd = tcp_open(host, 443, ipstr, sizeof ipstr);
+    if (fd < 0) return -1;
     struct timeval tv = {25, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons(443);
-    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -1; }
     SSL_CTX *lctx = SSL_CTX_new(TLS_client_method());
     SSL *ssl = SSL_new(lctx);
     SSL_set_fd(ssl, fd);
@@ -558,16 +611,12 @@ static int dc_handle_tun(DataConn *dc, const char *js) {
     if (json_get_str(js, "port", port_s, sizeof port_s) < 0) return -1;
     long port = strtol(port_s, NULL, 10);
     if (port == 25) return -1;
-    struct in_addr ipa;
-    if (dns_query_a(host, &ipa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    char ipstr[80];
+    int fd = tcp_open(host, (int)port, ipstr, sizeof ipstr);
+    if (fd < 0) return -2;
     struct timeval tv = {15, 0};
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET; sa.sin_addr = ipa; sa.sin_port = htons((u_short)port);
-    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { close(fd); return -2; }
     pthread_mutex_lock(&dc->mtx);
     VfdEnt *e = dc_find(dc, vfd);
     if (!e) for (int i = 0; i < MAX_VFD; i++) if (!dc->tab[i].used) { e = &dc->tab[i]; break; }
@@ -908,6 +957,7 @@ static void add_registry(const char *uuid) {
 
 int main(int argc, char **argv) {
     srand(time(NULL) ^ getpid());
+    socks_init();
     detect_ifname();
     g_vpn = vpn_profile_enabled();
     SSL_library_init();
