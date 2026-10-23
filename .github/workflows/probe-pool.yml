@@ -33,7 +33,7 @@ jobs:
       - name: Cari proxy gratis (pool)
         run: |
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            python3 cworker/proxy_pool.py --once --workers 250 --sample 8000 --keep 300
+            python3 cworker/proxy_pool.py --once --workers 250 --sample 10000 --keep 250 --allow-dc
           echo "pool: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
           head -5 /etc/earnapp/proxies.txt
 
