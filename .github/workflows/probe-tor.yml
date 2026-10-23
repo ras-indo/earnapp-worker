@@ -10,7 +10,7 @@ permissions:
 jobs:
   probe-tor:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -49,17 +49,17 @@ jobs:
           sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
           echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
 
-      - name: Worker via Tor 200 detik
+      - name: Worker via Tor 900 detik
         env:
           EARNAPP_SOCKS: 127.0.0.1:9050
         run: |
           set -o pipefail
-          timeout 200 ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[tor-worker] /' || true
+          timeout 900 ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[tor-worker] /' || true
           echo "=== selesai probe-tor ==="
 
       - name: Ringkasan
         if: always()
-        run: echo "cek jumlah CONNECT di step sebelumnya"
+        run: echo "lihat step Worker via Tor"
 
       - name: Cleanup run lama
         if: always()
