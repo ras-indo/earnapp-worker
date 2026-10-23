@@ -744,7 +744,37 @@ typedef struct {
     NodeCtx *node;
     VfdEnt tab[MAX_VFD];
     pthread_mutex_t mtx;
+    pthread_mutex_t wmtx;   /* SSL_write tidak boleh bersamaan antar thread */
+    int refs;               /* pump + dc thread */
+    volatile int dead;
 } DataConn;
+
+static void dc_send_text(DataConn *dc, const char *s) {
+    pthread_mutex_lock(&dc->wmtx);
+    ws_send_text(dc->ws, s);
+    pthread_mutex_unlock(&dc->wmtx);
+}
+static void dc_send_bin(DataConn *dc, const unsigned char *b, int len) {
+    pthread_mutex_lock(&dc->wmtx);
+    ws_send_bin(dc->ws, b, len);
+    pthread_mutex_unlock(&dc->wmtx);
+}
+static void dc_send_ping(DataConn *dc) {
+    pthread_mutex_lock(&dc->wmtx);
+    ws_send_ping(dc->ws);
+    pthread_mutex_unlock(&dc->wmtx);
+}
+static void dc_release(DataConn *dc) {
+    int last = 0;
+    pthread_mutex_lock(&dc->mtx);
+    if (--dc->refs <= 0) last = 1;
+    pthread_mutex_unlock(&dc->mtx);
+    if (!last) return;
+    pthread_mutex_destroy(&dc->mtx);
+    pthread_mutex_destroy(&dc->wmtx);
+    ws_close(dc->ws);
+    free(dc);
+}
 
 static VfdEnt *dc_find(DataConn *dc, int vfd) {
     for (int i = 0; i < MAX_VFD; i++)
@@ -759,7 +789,7 @@ static void dc_send_ack(DataConn *dc, int vfd) {
     if (t - e->last_ack_ms < 100) return;
     e->last_ack_ms = t;
     char m[64]; snprintf(m, sizeof m, "{\"vfd\":%d,\"ack\":%ld}", vfd, e->rx);
-    ws_send_text(dc->ws, m);
+    dc_send_text(dc, m);
 }
 
 static void dc_close_vfd(DataConn *dc, int vfd) {
@@ -774,7 +804,7 @@ static void dc_close_vfd(DataConn *dc, int vfd) {
         pthread_mutex_unlock(&g_statmtx);
     }
     char m[64]; snprintf(m, sizeof m, "{\"vfd\":%d,\"fin\":1}", vfd);
-    ws_send_text(dc->ws, m);
+    dc_send_text(dc, m);
 }
 
 static int dc_handle_tun(DataConn *dc, const char *js) {
@@ -801,7 +831,7 @@ static int dc_handle_tun(DataConn *dc, const char *js) {
     if (e) { e->vfd = vfd; e->fd = fd; e->rx = 0; e->last_ack_ms = 0; e->used = 1; }
     pthread_mutex_unlock(&dc->mtx);
     char m[48]; snprintf(m, sizeof m, "{\"vfd\":%ld,\"win_size\":2097152}", vfd);
-    ws_send_text(dc->ws, m);
+    dc_send_text(dc, m);
     pthread_mutex_lock(&g_statmtx);
     g_streams_total++;
     pthread_mutex_unlock(&g_statmtx);
@@ -812,6 +842,7 @@ static int dc_handle_tun(DataConn *dc, const char *js) {
 static void *pump_thread(void *arg) {
     DataConn *dc = arg;
     for (;;) {
+        if (dc->dead) break;
         pthread_mutex_lock(&dc->mtx);
         int alive = 0;
         fd_set rfds; FD_ZERO(&rfds);
@@ -836,10 +867,11 @@ static void *pump_thread(void *arg) {
             unsigned int vn = htonl(vfd);
             memcpy(out, &vn, 4); memset(out + 4, 0, 4);
             memcpy(out + 8, buf, n);
-            ws_send_bin(dc->ws, out, 8 + n);
+            dc_send_bin(dc, out, 8 + n);
             free(out);
         }
     }
+    dc_release(dc);
     return NULL;
 }
 
@@ -852,7 +884,7 @@ static void *dc_thread(void *arg) {
         int rc = ws_recv_frame(ws, &op, &data, &plen, 5);
         if (rc == -2) {
             long t = now_ms();
-            if (t - last_ping >= 30000) { ws_send_ping(ws); last_ping = t; }
+            if (t - last_ping >= 30000) { dc_send_ping(dc); last_ping = t; }
             continue;
         }
         if (rc < 0) { free(data); break; }
@@ -873,12 +905,12 @@ static void *dc_thread(void *arg) {
                     "{\"type\":\"ipc_result\",\"cmd\":\"tun\",\"cookie\":%ld,\"msg\":{\"err\":\"conn\"}}", cookie);
                 else snprintf(out, sizeof out,
                     "{\"type\":\"ipc_result\",\"cmd\":\"tun\",\"cookie\":%ld,\"msg\":{}}", cookie);
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             } else if (!strcmp(cmd, "tun_close")) {
                 dc_close_vfd(dc, json_get_int(js, "vfd", 0));
                 snprintf(out, sizeof out,
                     "{\"type\":\"ipc_result\",\"cmd\":\"tun_close\",\"cookie\":%ld,\"msg\":{}}", cookie);
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             } else if (!strcmp(cmd, "tunnel_init")) {
                 /* IDENTIK main conn (dgn cid utk data conn) — server validasi field ini */
                 char cidpart[128] = "";
@@ -898,7 +930,7 @@ static void *dc_thread(void *arg) {
                     cookie, dc->node->oldcid, dc->node->uuid, g_ifname,
                     dc->node->consent_ts,
                     g_vpn ? "true" : "false", cidpart);
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             } else if (!strcmp(cmd, "status_get")) {
                 long ts = now_ms();
                 double cpu = cpu_usage_pct(), mem = mem_usage_pct();
@@ -910,15 +942,15 @@ static void *dc_thread(void *arg) {
                     "\"heap_usage_ts\":%ld},\"bw\":{},\"vpn_profile_enabled\":%s}}",
                     cookie, cpu, ts, mem, ts, active_streams(), ts, ts,
                     g_vpn ? "true" : "false");
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             } else if (!strcmp(cmd, "dns")) {
                 snprintf(out, sizeof out,
                     "{\"type\":\"ipc_result\",\"cmd\":\"dns\",\"cookie\":%ld,\"msg\":{\"res\":[]}}", cookie);
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             } else {
                 snprintf(out, sizeof out,
                     "{\"type\":\"ipc_error\",\"cmd\":\"%s\",\"cookie\":%ld,\"msg\":\"nd\"}", cmd, cookie);
-                ws_send_text(ws, out);
+                dc_send_text(dc, out);
             }
             free(data); continue;
         }
@@ -944,12 +976,12 @@ static void *dc_thread(void *arg) {
         }
         free(data);
     }
+    dc->dead = 1;
     pthread_mutex_lock(&dc->mtx);
     for (int i = 0; i < MAX_VFD; i++) if (dc->tab[i].used) { close(dc->tab[i].fd); dc->tab[i].used = 0; }
     pthread_mutex_unlock(&dc->mtx);
     logt("n%d data conn closed", dc->node->idx);
-    ws_close(ws);
-    free(dc);
+    dc_release(dc);
     return NULL;
 }
 
@@ -964,6 +996,8 @@ static void open_data_conn(NodeCtx *n, const char *host, int port, const char *s
     DataConn *dc = calloc(1, sizeof *dc);
     dc->ws = ws; dc->node = n;
     pthread_mutex_init(&dc->mtx, NULL);
+    pthread_mutex_init(&dc->wmtx, NULL);
+    dc->refs = 2;
     pthread_t th, pth;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
