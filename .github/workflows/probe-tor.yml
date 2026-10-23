@@ -22,7 +22,7 @@ jobs:
       - name: Install Tor + torsocks
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq tor torsocks libssl-dev
+          sudo apt-get install -y -qq tor libssl-dev
           gcc -O2 -o earnappd cworker/earnappd.c -lssl -lcrypto -lpthread
 
       - name: Nyalakan Tor + tunggu bootstrap
@@ -50,9 +50,11 @@ jobs:
           echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
 
       - name: Worker via Tor 200 detik
+        env:
+          EARNAPP_SOCKS: 127.0.0.1:9050
         run: |
           set -o pipefail
-          timeout 200 torsocks ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[tor-worker] /' || true
+          timeout 200 ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[tor-worker] /' || true
           echo "=== selesai probe-tor ==="
 
       - name: Ringkasan
