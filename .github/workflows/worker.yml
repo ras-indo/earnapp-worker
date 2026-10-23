@@ -50,10 +50,24 @@ jobs:
           echo "node terdaftar: $(grep -c . /etc/earnapp/nodes.txt)"
           echo "consent: $(cat /etc/earnapp/consent)"
 
+      - name: Tor (opsional, aktif kalau vars.EARNAPP_SOCKS diisi)
+        if: vars.EARNAPP_SOCKS != ''
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tor
+          sudo service tor start || sudo tor --SocksPort 9050 --RunAsDaemon 1
+          for i in $(seq 1 60); do
+            curl -s --max-time 5 --socks5-hostname 127.0.0.1:9050 https://api.ipify.org >/dev/null && break
+            sleep 2
+          done
+          echo "tor exit IP: $(curl -s --max-time 10 --socks5-hostname 127.0.0.1:9050 https://api.ipify.org)"
+          curl -s --max-time 15 --socks5-hostname 127.0.0.1:9050 https://ipinfo.io/json | grep -E '"(org|city)"' || true
+
       - name: Jalankan worker (5j45m)
+        env:
+          EARNAPP_SOCKS: ${{ vars.EARNAPP_SOCKS }}
         run: |
           set -o pipefail
-          timeout 20700 sudo ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[worker] /'
+          timeout 20700 sudo env EARNAPP_SOCKS="$EARNAPP_SOCKS" ./earnappd 2>&1 | stdbuf -oL sed -u 's/^/[worker] /'
 
       - name: Cleanup run & artifact lama
         if: always()
