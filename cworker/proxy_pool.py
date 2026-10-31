@@ -242,7 +242,15 @@ def cycle(workers, keep, sample, timeout, allow_dc=False):
         alive.sort()
     elif alive:
         try:
-            alive = rank_residential(alive[:max(keep, 200)], prefer=a.prefer_country)
+            meta = ip_meta([r[2] for r in alive])
+            us = [r for r in alive if (meta.get(r[2]) or {}).get("countryCode","").upper()==a.prefer_country.upper()]
+            log("negara %s: %d dari %d hidup" % (a.prefer_country, len(us), len(alive)))
+            if len(us) >= 25:
+                alive = rank_residential(us[:max(keep, 200)], prefer=a.prefer_country)
+                log("mode: hanya %s (%d proxy)" % (a.prefer_country, len(alive)))
+            else:
+                alive = rank_residential(alive[:max(keep, 200)], prefer=a.prefer_country)
+                log("mode: campuran (US kurang dari 25)")
         except Exception as e:
             log("ranking gagal: %s" % e)
     if not alive:
