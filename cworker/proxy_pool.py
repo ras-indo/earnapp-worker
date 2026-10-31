@@ -199,14 +199,15 @@ def residential_only(rows, factor=3):
     return good
 
 
-def rank_residential(rows):
-    """Taruh IP residential/mobile di atas (tanpa membuang yang hosting)."""
+def rank_residential(rows, prefer="US"):
     meta = ip_meta([r[2] for r in rows])
     def score(r):
         m = meta.get(r[2]) or {}
-        return 0 if (m and not m.get("hosting") and not m.get("proxy")) else 1
-    return sorted(rows, key=lambda r: (score(r), r[0]))
-
+        country = (m.get("countryCode") or "").upper()
+        hosting = bool(m.get("hosting") or m.get("proxy"))
+        country_pen = 0 if country == prefer.upper() else 1
+        return (country_pen, 1 if hosting else 0, r[0])
+    return sorted(rows, key=score)
 
 def write_atomic(rows):
     tmp = OUT + ".tmp"
@@ -241,7 +242,7 @@ def cycle(workers, keep, sample, timeout, allow_dc=False):
         alive.sort()
     elif alive:
         try:
-            alive = rank_residential(alive[:max(keep, 200)])
+            alive = rank_residential(alive[:max(keep, 200)], prefer=a.prefer_country)
         except Exception as e:
             log("ranking gagal: %s" % e)
     if not alive:
@@ -260,6 +261,7 @@ def main():
     ap.add_argument("--sample", type=int, default=2500, help="maks proxy diuji per siklus")
     ap.add_argument("--timeout", type=float, default=6.0)
     ap.add_argument("--allow-dc", action="store_true", help="izinkan IP hosting (default: hanya residential)")
+    ap.add_argument("--prefer-country", default="US", help="negara yang diprioritaskan (default US)")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
     while True:
