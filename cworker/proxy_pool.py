@@ -322,22 +322,23 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                     except Exception as e:
                         log("gagal simpan cache: %s" % e)
                 elif len(verified) >= 10:
-                    alive = rank_residential(verified[:max(keep, 200)] + [r for r in us if r not in verified][:max(keep-len(verified),0)], prefer=prefer_country)
-                    log("mode: %s terverifikasi + cadangan (%d proxy)" % (prefer_country, len(alive)))
-                else:
-                    alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
-                    log("mode: %s tanpa verifikasi (%d proxy)" % (prefer_country, len(alive)))
-            else:
-                if us:
-                    alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
-                    log("mode: hanya US yang tersedia (%d proxy) — kurang dari 25" % len(alive))
+                    alive = []
+                    log("mode: US terverifikasi kurang dari 25 (%d) — skip" % len(verified))
                 else:
                     alive = []
-                    log("mode: tidak ada US — file lama dipertahankan")
+                    log("mode: US terverifikasi kurang dari 10 — skip")
+            else:
+                alive = []
+                log("mode: US kurang dari 25 — skip")
         except Exception as e:
             log("ranking gagal: %s" % e)
     if not alive:
-        log("TIDAK ADA proxy hidup — file lama dipertahankan")
+        log("TIDAK ADA proxy US terverifikasi — file dikosongkan (strict US-only)")
+        try:
+            with open("/etc/earnapp/proxies.txt", "w") as f:
+                pass
+        except Exception:
+            pass
         return 0
     write_atomic(alive[:keep])
     log("hidup: %d — ditulis %d terbaik ke %s (tercepat %.2fs)" % (len(alive), min(len(alive), keep), OUT, alive[0][0]))
