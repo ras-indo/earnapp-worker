@@ -19,6 +19,11 @@ jobs:
     timeout-minutes: 355          # < batas keras GitHub 360 menit
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: /etc/earnapp/us_pool.txt
+          key: us-pool-${{ github.run_id }}
+          restore-keys: us-pool-
 
       - name: Diagnostik IP runner
         run: |
@@ -65,9 +70,9 @@ jobs:
       - name: Proxy pool gratis
         run: |
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            python3 cworker/proxy_pool.py --once --workers 300 --sample 10000 --keep 250 --allow-dc --prefer-country US
+            python3 cworker/proxy_pool.py --once --workers 500 --sample 20000 --keep 250 --allow-dc --prefer-country US
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            nohup python3 cworker/proxy_pool.py --interval 300 --workers 300 --sample 10000 --keep 250 --allow-dc --prefer-country US \
+            nohup python3 cworker/proxy_pool.py --interval 300 --workers 500 --sample 20000 --keep 250 --allow-dc --prefer-country US \
             >/tmp/proxy_refresh.log 2>&1 &
           echo "pool awal: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
 

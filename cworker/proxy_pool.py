@@ -247,7 +247,7 @@ def write_atomic(rows):
         pass
 
 
-def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US"):
+def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", us_cache="/etc/earnapp/us_pool.txt"):
     pool = collect()
     pool = list(pool)
     random.shuffle(pool)
@@ -269,12 +269,38 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US"):
             meta = ip_meta([r[2] for r in alive])
             us = [r for r in alive if (meta.get(r[2]) or {}).get("countryCode","").upper()==prefer_country.upper()]
             log("negara %s: %d dari %d hidup" % (prefer_country, len(us), len(alive)))
+            # load cached US proxies
+            cached = []
+            try:
+                if os.path.exists(us_cache):
+                    with open(us_cache) as f:
+                        for line in f:
+                            line=line.strip()
+                            if ":" in line:
+                                ip,port = line.rsplit(":",1)
+                                cached.append((0.5, ip, int(port)))
+            except Exception:
+                cached = []
+            if cached:
+                log("cache US: %d proxy dari run sebelumnya" % len(cached))
+                # verify cached quickly
+                v_cached = verify_exit_country(cached, prefer_country, timeout=5)
+                log("cache US terverifikasi: %d/%d" % (len(v_cached), len(cached)))
+                us = list({(r[1],r[2]): r for r in (us + v_cached)}.values())
             if len(us) >= 25:
                 verified = verify_exit_country(us[:max(keep*2, 60)], prefer_country)
                 log("verifikasi exit IP %s: %d/%d lolos" % (prefer_country, len(verified), len(us)))
                 if len(verified) >= 25:
                     alive = rank_residential(verified[:max(keep, 200)], prefer=prefer_country)
                     log("mode: hanya %s terverifikasi (%d proxy)" % (prefer_country, len(alive)))
+                    # save cache
+                    try:
+                        os.makedirs(os.path.dirname(us_cache), exist_ok=True)
+                        with open(us_cache,"w") as f:
+                            for r in verified[:100]:
+                                f.write("%s:%d\n" % (r[1], r[2]))
+                    except Exception as e:
+                        log("gagal simpan cache: %s" % e)
                 elif len(verified) >= 10:
                     alive = rank_residential(verified[:max(keep, 200)] + [r for r in us if r not in verified][:max(keep-len(verified),0)], prefer=prefer_country)
                     log("mode: %s terverifikasi + cadangan (%d proxy)" % (prefer_country, len(alive)))
@@ -303,11 +329,12 @@ def main():
     ap.add_argument("--timeout", type=float, default=6.0)
     ap.add_argument("--allow-dc", action="store_true", help="izinkan IP hosting (default: hanya residential)")
     ap.add_argument("--prefer-country", default="US", help="negara yang diprioritaskan (default US)")
+    ap.add_argument("--us-cache", default="/etc/earnapp/us_pool.txt", help="cache file proxy US terverifikasi")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
     while True:
         try:
-            cycle(a.workers, a.keep, a.sample, a.timeout, a.allow_dc)
+            cycle(a.workers, a.keep, a.sample, a.timeout, a.allow_dc, a.prefer_country, a.us_cache)
         except KeyboardInterrupt:
             return 0
         except Exception as e:
