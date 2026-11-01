@@ -209,6 +209,30 @@ def rank_residential(rows, prefer="US"):
         return (country_pen, 1 if hosting else 0, r[0])
     return sorted(rows, key=score)
 
+def verify_exit_country(rows, prefer, timeout=8):
+    import urllib.request, json
+    out = []
+    def one(r):
+        lat, ip, port = r
+        proxy_url = "http://%s:%d" % (ip, port)
+        try:
+            ph = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            opener = urllib.request.build_opener(ph)
+            req = urllib.request.Request("http://ip-api.com/json/?fields=countryCode", headers={"User-Agent": "Mozilla/5.0"})
+            with opener.open(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8", "ignore"))
+                if (data.get("countryCode") or "").upper() == prefer.upper():
+                    return r
+        except Exception:
+            return None
+        return None
+    with cf.ThreadPoolExecutor(max_workers=16) as ex:
+        for res in ex.map(one, rows):
+            if res:
+                out.append(res)
+    return out
+
+
 def write_atomic(rows):
     tmp = OUT + ".tmp"
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
@@ -246,8 +270,17 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US"):
             us = [r for r in alive if (meta.get(r[2]) or {}).get("countryCode","").upper()==prefer_country.upper()]
             log("negara %s: %d dari %d hidup" % (prefer_country, len(us), len(alive)))
             if len(us) >= 25:
-                alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
-                log("mode: hanya %s (%d proxy)" % (prefer_country, len(alive)))
+                verified = verify_exit_country(us[:max(keep*2, 60)], prefer_country)
+                log("verifikasi exit IP %s: %d/%d lolos" % (prefer_country, len(verified), len(us)))
+                if len(verified) >= 25:
+                    alive = rank_residential(verified[:max(keep, 200)], prefer=prefer_country)
+                    log("mode: hanya %s terverifikasi (%d proxy)" % (prefer_country, len(alive)))
+                elif len(verified) >= 10:
+                    alive = rank_residential(verified[:max(keep, 200)] + [r for r in us if r not in verified][:max(keep-len(verified),0)], prefer=prefer_country)
+                    log("mode: %s terverifikasi + cadangan (%d proxy)" % (prefer_country, len(alive)))
+                else:
+                    alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
+                    log("mode: %s tanpa verifikasi (%d proxy)" % (prefer_country, len(alive)))
             else:
                 alive = rank_residential(alive[:max(keep, 200)], prefer=prefer_country)
                 log("mode: campuran (US kurang dari 25)")
