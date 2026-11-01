@@ -22,8 +22,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: /etc/earnapp/us_pool.txt
-          key: us-pool-${{ github.run_id }}
-          restore-keys: us-pool-
+          key: us-pool-v2-${{ github.run_id }}
+          restore-keys: us-pool-v2-
 
       - name: Diagnostik IP runner
         run: |

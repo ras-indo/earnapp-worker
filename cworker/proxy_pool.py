@@ -328,8 +328,12 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                     alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
                     log("mode: %s tanpa verifikasi (%d proxy)" % (prefer_country, len(alive)))
             else:
-                alive = rank_residential(alive[:max(keep, 200)], prefer=prefer_country)
-                log("mode: campuran (US kurang dari 25)")
+                if us:
+                    alive = rank_residential(us[:max(keep, 200)], prefer=prefer_country)
+                    log("mode: hanya US yang tersedia (%d proxy) — kurang dari 25" % len(alive))
+                else:
+                    alive = []
+                    log("mode: tidak ada US — file lama dipertahankan")
         except Exception as e:
             log("ranking gagal: %s" % e)
     if not alive:
