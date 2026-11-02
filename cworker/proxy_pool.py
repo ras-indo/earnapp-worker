@@ -307,10 +307,10 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                 v_cached = verify_exit_country(cached, prefer_country, timeout=5)
                 log("cache US terverifikasi: %d/%d" % (len(v_cached), len(cached)))
                 us = list({(r[1],r[2]): r for r in (us + v_cached)}.values())
-            if len(us) >= 25:
+            if len(us) >= 1:
                 verified = verify_exit_country(us[:max(keep*2, 60)], prefer_country)
                 log("verifikasi exit IP %s: %d/%d lolos" % (prefer_country, len(verified), len(us)))
-                if len(verified) >= 25:
+                if len(verified) >= 1:
                     alive = rank_residential(verified[:max(keep, 200)], prefer=prefer_country)
                     log("mode: hanya %s terverifikasi (%d proxy)" % (prefer_country, len(alive)))
                     # save cache
@@ -321,12 +321,9 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                                 f.write("%s:%d\n" % (r[1], r[2]))
                     except Exception as e:
                         log("gagal simpan cache: %s" % e)
-                elif len(verified) >= 10:
-                    alive = []
-                    log("mode: US terverifikasi kurang dari 25 (%d) — skip" % len(verified))
                 else:
                     alive = []
-                    log("mode: US terverifikasi kurang dari 10 — skip")
+                    log("mode: tidak ada %s terverifikasi — skip" % prefer_country)
             else:
                 alive = []
                 log("mode: US kurang dari 25 — skip")
