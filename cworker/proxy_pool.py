@@ -281,15 +281,14 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
             if res:
                 alive.append(res)
     alive.sort()
-    if alive and not allow_dc:
-        alive = residential_only(alive[:max(keep * 4, 200)])
-        alive.sort()
-    elif alive:
+    if prefer_country and alive:
         try:
+            if not allow_dc:
+                alive = residential_only(alive[:max(keep * 4, 200)])
+                alive.sort()
             meta = ip_meta([r[2] for r in alive])
             us = [r for r in alive if (meta.get(r[2]) or {}).get("countryCode","").upper()==prefer_country.upper()]
             log("negara %s: %d dari %d hidup" % (prefer_country, len(us), len(alive)))
-            # load cached US proxies
             cached = []
             try:
                 if os.path.exists(us_cache):
@@ -303,7 +302,6 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                 cached = []
             if cached:
                 log("cache US: %d proxy dari run sebelumnya" % len(cached))
-                # verify cached quickly
                 v_cached = verify_exit_country(cached, prefer_country, timeout=5)
                 log("cache US terverifikasi: %d/%d" % (len(v_cached), len(cached)))
                 us = list({(r[1],r[2]): r for r in (us + v_cached)}.values())
@@ -313,7 +311,6 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                 if len(verified) >= 1:
                     alive = rank_residential(verified[:max(keep, 200)], prefer=prefer_country)
                     log("mode: hanya %s terverifikasi (%d proxy)" % (prefer_country, len(alive)))
-                    # save cache
                     try:
                         os.makedirs(os.path.dirname(us_cache), exist_ok=True)
                         with open(us_cache,"w") as f:
@@ -323,14 +320,15 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
                         log("gagal simpan cache: %s" % e)
                 else:
                     alive = []
-                    log("mode: tidak ada %s terverifikasi — skip" % prefer_country)
+                    log("mode: tidak ada %s terverifikasi - skip" % prefer_country)
             else:
                 alive = []
-                log("mode: US kurang dari 25 — skip")
+                log("mode: US kurang dari 1 - skip")
         except Exception as e:
             log("ranking gagal: %s" % e)
+            alive = []
     if not alive:
-        log("TIDAK ADA proxy US terverifikasi — file dikosongkan (strict US-only)")
+        log("TIDAK ADA proxy US terverifikasi - file dikosongkan (strict US-only)")
         try:
             with open("/etc/earnapp/proxies.txt", "w") as f:
                 pass
@@ -338,33 +336,5 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
             pass
         return 0
     write_atomic(alive[:keep])
-    log("hidup: %d — ditulis %d terbaik ke %s (tercepat %.2fs)" % (len(alive), min(len(alive), keep), OUT, alive[0][0]))
+    log("hidup: %d - ditulis %d terbaik ke %s" % (len(alive), min(len(alive), keep), OUT))
     return len(alive)
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--interval", type=int, default=300, help="detik antar siklus")
-    ap.add_argument("--workers", type=int, default=200)
-    ap.add_argument("--keep", type=int, default=MAX_KEEP)
-    ap.add_argument("--sample", type=int, default=2500, help="maks proxy diuji per siklus")
-    ap.add_argument("--timeout", type=float, default=6.0)
-    ap.add_argument("--allow-dc", action="store_true", help="izinkan IP hosting (default: hanya residential)")
-    ap.add_argument("--prefer-country", default="US", help="negara yang diprioritaskan (default US)")
-    ap.add_argument("--us-cache", default="/etc/earnapp/us_pool.txt", help="cache file proxy US terverifikasi")
-    ap.add_argument("--once", action="store_true")
-    a = ap.parse_args()
-    while True:
-        try:
-            cycle(a.workers, a.keep, a.sample, a.timeout, a.allow_dc, a.prefer_country, a.us_cache)
-        except KeyboardInterrupt:
-            return 0
-        except Exception as e:
-            log("siklus error: %s" % e)
-        if a.once:
-            return 0
-        time.sleep(a.interval)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
