@@ -281,60 +281,9 @@ def cycle(workers, keep, sample, timeout, allow_dc=False, prefer_country="US", u
             if res:
                 alive.append(res)
     alive.sort()
-    if prefer_country and alive:
-        try:
-            if not allow_dc:
-                alive = residential_only(alive[:max(keep * 4, 200)])
-                alive.sort()
-            meta = ip_meta([r[2] for r in alive])
-            us = [r for r in alive if (meta.get(r[2]) or {}).get("countryCode","").upper()==prefer_country.upper()]
-            log("negara %s: %d dari %d hidup" % (prefer_country, len(us), len(alive)))
-            cached = []
-            try:
-                if os.path.exists(us_cache):
-                    with open(us_cache) as f:
-                        for line in f:
-                            line=line.strip()
-                            if ":" in line:
-                                ip,port = line.rsplit(":",1)
-                                cached.append((0.5, ip, int(port)))
-            except Exception:
-                cached = []
-            if cached:
-                log("cache US: %d proxy dari run sebelumnya" % len(cached))
-                v_cached = verify_exit_country(cached, prefer_country, timeout=5)
-                log("cache US terverifikasi: %d/%d" % (len(v_cached), len(cached)))
-                us = list({(r[1],r[2]): r for r in (us + v_cached)}.values())
-            if len(us) >= 1:
-                verified = verify_exit_country(us[:max(keep*2, 60)], prefer_country)
-                log("verifikasi exit IP %s: %d/%d lolos" % (prefer_country, len(verified), len(us)))
-                if len(verified) >= 1:
-                    alive = rank_residential(verified[:max(keep, 200)], prefer=prefer_country)
-                    log("mode: hanya %s terverifikasi (%d proxy)" % (prefer_country, len(alive)))
-                    try:
-                        os.makedirs(os.path.dirname(us_cache), exist_ok=True)
-                        with open(us_cache,"w") as f:
-                            for r in verified[:100]:
-                                f.write("%s:%d\n" % (r[1], r[2]))
-                    except Exception as e:
-                        log("gagal simpan cache: %s" % e)
-                else:
-                    alive = []
-                    log("mode: tidak ada %s terverifikasi - skip" % prefer_country)
-            else:
-                alive = []
-                log("mode: US kurang dari 1 - skip")
-        except Exception as e:
-            log("ranking gagal: %s" % e)
-            alive = []
     if not alive:
-        log("TIDAK ADA proxy US terverifikasi - file dikosongkan (strict US-only)")
-        try:
-            with open("/etc/earnapp/proxies.txt", "w") as f:
-                pass
-        except Exception:
-            pass
+        log("TIDAK ADA proxy hidup — file lama dipertahankan")
         return 0
     write_atomic(alive[:keep])
-    log("hidup: %d - ditulis %d terbaik ke %s" % (len(alive), min(len(alive), keep), OUT))
+    log("hidup: %d — ditulis %d terbaik ke %s" % (len(alive), min(len(alive), keep), OUT))
     return len(alive)
