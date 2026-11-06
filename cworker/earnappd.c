@@ -6,6 +6,8 @@
  *   earnappd -n N          : jalankan N node pertama dari registry
  *   earnappd               : jalankan SEMUA node di registry
  * Registry: /etc/earnapp/nodes.txt (1 uuid per baris)
+ * Env US-only: EARNAPP_US_ONLY=1 + EARNAPP_PROXY_FILE=/etc/earnapp/proxies.txt
+ *   (direct dan EARNAPP_SOCKS/Tor diblokir; pool wajib berheader country=US)
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -57,11 +59,13 @@ typedef struct NodeCtx {
     long consent_ts;
     int hb_n;
     int idx;
+    long last_wait_log;
     pthread_mutex_t mtx;
 } NodeCtx;
 
 static char g_ifname[32] = "eth0";
 static int g_vpn = 0;
+static int g_us_only = 0;   /* wajib proxy US; direct & Tor diblokir */
 
 static void logt(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -220,6 +224,17 @@ static int px_load(const char *path, int force) {
     if (!force && (long)st.st_mtime == g_px_mtime) return 0;
     FILE *f = fopen(path, "r");
     if (!f) return -1;
+    if (g_us_only) {
+        char head[192];
+        if (!fgets(head, sizeof head, f)) { fclose(f); return -1; }
+        if (!strstr(head, "country=US")) {
+            head[strcspn(head, "\r\n")] = 0;
+            logt("pool ditolak (bukan US-only): %s", head);
+            fclose(f);
+            return -1;
+        }
+        rewind(f);
+    }
     pthread_mutex_lock(&g_pxmtx);
     /* pertahankan status proxy yang sudah dikenal */
     Px old[MAX_PX];
@@ -260,6 +275,9 @@ static int px_acquire(NodeCtx *n) {
     }
     /* 2) kalau belum punya, ambil yang paling atas (file diurut kualitas) */
     if (best < 0) {
+        /* lepas owner lama yang sudah mati supaya tidak menyandera slot */
+        for (int i = 0; i < g_pxn; i++)
+            if (g_px[i].owner == n->idx) g_px[i].owner = -1;
         for (int i = 0; i < g_pxn; i++) {
             if (g_px[i].dead_until > t) continue;
             if (g_px[i].owner == -1) { best = i; break; }
@@ -289,10 +307,22 @@ static void px_drop(NodeCtx *n) {
     n->px_type = 0; n->px_host[0] = 0; n->px_port = 0;
 }
 
+static int px_count(void) {
+    pthread_mutex_lock(&g_pxmtx);
+    int n = g_pxn;
+    pthread_mutex_unlock(&g_pxmtx);
+    return n;
+}
+
 /* ---------------- SOCKS5 / HTTP CONNECT ---------------- */
 static void socks_init(void) {
+    const char *uo = getenv("EARNAPP_US_ONLY");
+    if (uo && (!strcmp(uo, "1") || !strcmp(uo, "true") || !strcmp(uo, "yes")))
+        g_us_only = 1;
+    if (g_us_only) logt("mode US-only: direct & Tor diblokir");
+
     const char *e = getenv("EARNAPP_SOCKS");
-    if (e && *e) {
+    if (!g_us_only && e && *e) {
         const char *c = strrchr(e, ':');
         if (c) {
             int n = (int)(c - e);
@@ -303,6 +333,8 @@ static void socks_init(void) {
                 logt("proxy global: %s:%d", g_socks_host, g_socks_port);
             }
         }
+    } else if (g_us_only && e && *e) {
+        logt("EARNAPP_SOCKS diabaikan (mode US-only)");
     }
     const char *f = getenv("EARNAPP_PROXY_FILE");
     if (f && *f) g_pxfile = f;
@@ -381,6 +413,7 @@ static int proxy_open(const char *pxh, int pxp, int type, const char *host, int 
 }
 
 static int tcp_open(const char *host, int port, char *ipstr, size_t n) {
+    if (g_us_only && !t_px_type) return -1;
     if (t_px_type) {
         int fd = proxy_open(t_px_host, t_px_port, t_px_type, host, port);
         if (fd >= 0) snprintf(ipstr, n, "px:%s", t_px_host);
@@ -1166,8 +1199,17 @@ static void *node_main(void *arg) {
     load_node_state(n);
     int fail = 0;
     for (;;) {
-        if (!n->px_type && g_pxn) {
-            if (px_acquire(n) < 0) { sleep(5); continue; }
+        if (!n->px_type) {
+            if (g_us_only || px_count() > 0) {
+                if (px_acquire(n) < 0) {
+                    if (g_us_only && now_s() - n->last_wait_log >= 30) {
+                        logt("n%d menunggu proxy US (pool=%d)", n->idx, px_count());
+                        n->last_wait_log = now_s();
+                    }
+                    sleep(5);
+                    continue;
+                }
+            }
         }
         t_px_type = n->px_type;
         snprintf(t_px_host, sizeof t_px_host, "%s", n->px_host);
@@ -1176,6 +1218,14 @@ static void *node_main(void *arg) {
         if (!ws) {
             fail++;
             if (n->px_type) { logt("n%d proxy mati (%s:%d) — ganti", n->idx, n->px_host, n->px_port); px_drop(n); sleep(2); continue; }
+            if (g_us_only) {
+                if (now_s() - n->last_wait_log >= 30) {
+                    logt("n%d gagal konek, menunggu proxy US", n->idx);
+                    n->last_wait_log = now_s();
+                }
+                sleep(5);
+                continue;
+            }
             sleep(5 + (fail > 6 ? 30 : fail * 3));
             continue;
         }
@@ -1242,7 +1292,8 @@ int main(int argc, char **argv) {
     if (limit > 0 && limit < ncount) ncount = limit;
     if (!ncount) { fprintf(stderr, "registry kosong — jalankan 'earnappd --new 1' dulu\n"); return 1; }
 
-    logt("=== earnappd v2 MULTI — %d node, ifname=%s vpn=%d ===", ncount, g_ifname, g_vpn);
+    logt("=== earnappd v2 MULTI — %d node, ifname=%s vpn=%d us_only=%d pool=%d ===",
+         ncount, g_ifname, g_vpn, g_us_only, px_count());
     {
         pthread_t pxt;
         if (pthread_create(&pxt, NULL, px_watch, NULL) == 0) pthread_detach(pxt);

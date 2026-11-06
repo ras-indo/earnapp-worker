@@ -10,7 +10,7 @@ permissions:
 jobs:
   probe-pool:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -35,19 +35,30 @@ jobs:
           sudo chmod 644 /etc/earnapp/nodes.txt /etc/earnapp/consent
           echo "nodes: $(grep -c . /etc/earnapp/nodes.txt)"
 
-      - name: Cari proxy gratis (pool)
+      - name: Cari proxy US-only (pool)
         run: |
-          sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
-            python3 cworker/proxy_pool.py --once --workers 250 --sample 20000 --keep 250 --allow-dc --prefer-country US
-          echo "pool: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
+          for attempt in 1 2; do
+            echo "=== pool attempt $attempt ==="
+            sudo timeout 600 env PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
+              python3 cworker/proxy_pool.py --once --workers 250 --sample 20000 --keep 250 \
+              --allow-dc --prefer-country US || true
+            grep -q '^# earnapp pool country=US' /etc/earnapp/proxies.txt 2>/dev/null && break
+            sleep 20
+          done
+          if ! grep -q '^# earnapp pool country=US' /etc/earnapp/proxies.txt 2>/dev/null; then
+            echo "::error::Tidak ada proxy US terverifikasi"
+            exit 1
+          fi
+          echo "pool US: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
           head -5 /etc/earnapp/proxies.txt
 
       - name: Worker via proxy pool 600 detik
         env:
+          EARNAPP_US_ONLY: "1"
           EARNAPP_PROXY_FILE: /etc/earnapp/proxies.txt
         run: |
           set -o pipefail
-          timeout 600 sudo env EARNAPP_PROXY_FILE="$EARNAPP_PROXY_FILE" ./earnappd 2>&1 \
+          timeout 600 sudo env EARNAPP_US_ONLY="$EARNAPP_US_ONLY" EARNAPP_PROXY_FILE="$EARNAPP_PROXY_FILE" ./earnappd 2>&1 \
             | stdbuf -oL sed -u 's/^/[pool] /' || true
           echo "=== selesai probe-pool ==="
 
