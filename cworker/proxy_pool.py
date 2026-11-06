@@ -66,6 +66,7 @@ CHECK_PORT = 443
 OUT = os.environ.get("PROXY_OUT", "/etc/earnapp/proxies.txt")
 LOG = os.environ.get("PROXY_LOG", "/var/log/proxy_pool.log")
 MAX_KEEP = int(os.environ.get("PROXY_MAX", "400"))
+BLOCK_COUNTRIES = "ID,INDONESIA"
 
 
 def log(msg):
@@ -363,6 +364,7 @@ def verify_country(rows, country, timeout, workers):
             continue
         rr = dict(r)
         rr["exit"] = ip
+        rr["country"] = (m.get("countryCode") or "").upper()
         rr["hosting"] = bool(m.get("hosting"))
         rr["proxy"] = bool(m.get("proxy"))
         out.append(rr)
@@ -420,14 +422,14 @@ def save_cache(rows, path):
         log("cache gagal disimpan: %s" % e)
 
 
-def write_atomic(rows, country):
+def write_atomic(rows, country, blocked):
     d = os.path.dirname(OUT)
     if d:
         os.makedirs(d, exist_ok=True)
     tmp = OUT + ".tmp"
     with open(tmp, "w") as f:
-        f.write("# earnapp pool country=%s verified=%d count=%d generated=%d\n"
-                % (country.upper(), int(time.time()), len(rows), int(time.time())))
+        f.write("# earnapp pool country=%s block=%s verified=%d count=%d generated=%d\n"
+                % (country.upper(), ",".join(sorted(blocked)), int(time.time()), len(rows), int(time.time())))
         for r in rows:
             f.write("%s://%s:%d\n" % (r["type"], r["host"], r["port"]))
     os.replace(tmp, OUT)
@@ -464,6 +466,11 @@ def cycle(args):
     candidates = alive[:max(args.keep * 8, 400)]
     log("verifikasi exit country %s untuk %d kandidat..." % (args.country, len(candidates)))
     verified = verify_country(candidates, args.country, args.timeout, args.verify_workers)
+    blocked = {c.strip().upper() for c in args.block_countries.split(",") if c.strip()}
+    before = len(verified)
+    verified = [r for r in verified if r.get("country") not in blocked]
+    if before != len(verified):
+        log("blokir %s: %d proxy dibuang" % (",".join(sorted(blocked)), before - len(verified)))
     if not args.allow_dc:
         verified = [r for r in verified if not r["hosting"] and not r["proxy"]]
     # satu node = satu exit IP; buang proxy yang exit IP-nya sama
@@ -482,7 +489,7 @@ def cycle(args):
         return 0
 
     final = verified[:args.keep]
-    write_atomic(final, args.country)
+    write_atomic(final, args.country, blocked)
     save_cache(final, args.us_cache)
     log("ditulis %d proxy %s ke %s (tercepat %.2fs, exit %s)" % (
         len(final), args.country, OUT, final[0]["lat"], final[0].get("exit", "?")))
@@ -499,6 +506,8 @@ def main():
     ap.add_argument("--timeout", type=float, default=6.0)
     ap.add_argument("--allow-dc", action="store_true", help="izinkan IP hosting (default: hanya residential)")
     ap.add_argument("--prefer-country", default="US", help="negara wajib (default US)")
+    ap.add_argument("--block-countries", default=BLOCK_COUNTRIES,
+                    help="country yang selalu diblokir (default ID,INDONESIA)")
     ap.add_argument("--us-cache", default="/etc/earnapp/us_pool.txt")
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()

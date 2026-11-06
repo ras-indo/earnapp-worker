@@ -61,19 +61,19 @@ jobs:
             echo "=== pool attempt $attempt ==="
             sudo timeout 600 env PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
               python3 cworker/proxy_pool.py --once --workers 500 --sample 20000 --keep 250 \
-              --allow-dc --prefer-country US || true
-            if grep -q '^# earnapp pool country=US' /etc/earnapp/proxies.txt 2>/dev/null; then
+              --allow-dc --prefer-country US --block-countries ID,INDONESIA || true
+            if grep -q '^# earnapp pool country=US block=ID' /etc/earnapp/proxies.txt 2>/dev/null; then
               break
             fi
             sleep 20
           done
-          if ! grep -q '^# earnapp pool country=US' /etc/earnapp/proxies.txt 2>/dev/null; then
+          if ! grep -q '^# earnapp pool country=US block=ID' /etc/earnapp/proxies.txt 2>/dev/null; then
             echo "::error::Tidak ada proxy US terverifikasi — worker dibatalkan"
             exit 1
           fi
           sudo PROXY_OUT=/etc/earnapp/proxies.txt PROXY_LOG=/tmp/proxy_pool.log \
             nohup python3 cworker/proxy_pool.py --interval 300 --workers 500 --sample 20000 --keep 250 \
-            --allow-dc --prefer-country US \
+            --allow-dc --prefer-country US --block-countries ID,INDONESIA \
             >/tmp/proxy_refresh.log 2>&1 &
           echo "pool US awal: $(grep -vc '^#' /etc/earnapp/proxies.txt || true)"
           head -3 /etc/earnapp/proxies.txt

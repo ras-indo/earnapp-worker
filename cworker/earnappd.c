@@ -7,7 +7,7 @@
  *   earnappd               : jalankan SEMUA node di registry
  * Registry: /etc/earnapp/nodes.txt (1 uuid per baris)
  * Env US-only: EARNAPP_US_ONLY=1 + EARNAPP_PROXY_FILE=/etc/earnapp/proxies.txt
- *   (direct dan EARNAPP_SOCKS/Tor diblokir; pool wajib berheader country=US)
+ *   (direct dan EARNAPP_SOCKS/Tor diblokir; pool wajib country=US + block=ID)
  */
 #include <stdio.h>
 #include <stdarg.h>
@@ -227,9 +227,9 @@ static int px_load(const char *path, int force) {
     if (g_us_only) {
         char head[192];
         if (!fgets(head, sizeof head, f)) { fclose(f); return -1; }
-        if (!strstr(head, "country=US")) {
+        if (!strstr(head, "country=US") || !strstr(head, "block=ID")) {
             head[strcspn(head, "\r\n")] = 0;
-            logt("pool ditolak (bukan US-only): %s", head);
+            logt("pool ditolak (wajib country=US + block=ID): %s", head);
             fclose(f);
             return -1;
         }

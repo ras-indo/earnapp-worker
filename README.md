@@ -21,8 +21,9 @@ Run berikutnya sudah antre di concurrency group `earnapp-worker`, jadi chain-nya
 Worker **hanya** mau jalan lewat proxy yang sudah diverifikasi exit country-nya US.
 - `cworker/proxy_pool.py` menguji proxy, mengecek exit IP, lalu lookup country via ip-api.
   Hanya proxy dengan `countryCode=US` yang ditulis ke `/etc/earnapp/proxies.txt`.
-- File pool diberi header `# earnapp pool country=US ...`; `earnappd` menolak pool
-  yang tidak punya header itu saat `EARNAPP_US_ONLY=1`.
+  Country `ID`/`INDONESIA` masuk blocklist eksplisit dan tidak pernah dipakai.
+- File pool diberi header `# earnapp pool country=US block=ID,INDONESIA ...`; `earnappd`
+  menolak pool yang tidak punya `country=US` + `block=ID` saat `EARNAPP_US_ONLY=1`.
 - Koneksi langsung (IP runner GitHub) dan `EARNAPP_SOCKS`/Tor diblokir di mode ini.
 - Kalau pool US kosong, worker menunggu; workflow berhenti di awal kalau pool tetap kosong
   setelah 2 percobaan, supaya tidak menghabiskan menit Actions tanpa hasil.
